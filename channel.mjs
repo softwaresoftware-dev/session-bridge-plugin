@@ -271,20 +271,10 @@ mcp.fallbackNotificationHandler = async (notification) => {
 }
 
 // --- Connect to Claude Code over stdio ---
-// Claude sends responses to channel notifications that the MCP SDK can't validate
-// (Zod error), which kills the transport. Suppress errors to keep alive.
 mcp.onerror = (err) => {
-  log(`mcp error (suppressed): ${String(err?.message || err).slice(0, 150)}`)
+  log(`mcp error: ${String(err?.message || err).slice(0, 200)}`)
 }
-const transport = new StdioServerTransport()
-await mcp.connect(transport)
-// After handshake completes, suppress transport errors to prevent close on Zod failures.
-// The SDK wraps transport.onerror during connect — delay override so initial setup works.
-setTimeout(() => {
-  transport.onerror = (err) => {
-    log(`transport error (suppressed): ${String(err?.message || err).slice(0, 150)}`)
-  }
-}, 1000)
+await mcp.connect(new StdioServerTransport())
 
 // --- HTTP channel server ---
 let nextId = 1
@@ -349,7 +339,12 @@ const httpServer = http.createServer(async (req, res) => {
         method: 'notifications/claude/channel',
         params: {
           content,
-          meta: { chat_id, from_name: fromName, from_id: fromId, path: url.pathname },
+          meta: {
+            chat_id,
+            path: url.pathname,
+            ...(fromName && { from_name: fromName }),
+            ...(fromId && { from_id: fromId }),
+          },
         },
       })
     } catch (err) {
