@@ -31,6 +31,14 @@ const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions')
 
 const log = (msg) => process.stderr.write(`[session-proxy] ${msg}\n`)
 
+// Prevent unhandled rejections from crashing the process
+process.on('unhandledRejection', (err) => log(`unhandled rejection: ${err}`))
+process.on('uncaughtException', (err) => log(`uncaught exception: ${err}`))
+
+// Keep alive if stdio closes (Claude may restart MCP connections)
+process.stdin.on('end', () => log('stdin closed'))
+process.stdout.on('error', (err) => log(`stdout error: ${err}`))
+
 // --- Find our session ID by walking up the process tree ---
 
 function readPpid(pid) {
@@ -130,7 +138,7 @@ function emitSSE(text) {
 const chatSenders = new Map()  // chat_id -> { from_name, from_id }
 
 // --- MCP Server with channel capability ---
-const serverName = sessionId ? `session-${sessionId.slice(0, 8)}` : 'session-proxy'
+const serverName = 'session-proxy'
 
 const mcp = new Server(
   { name: serverName, version: '0.1.0' },
@@ -198,14 +206,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     if (sender?.from_id) {
       // Route reply back through daemon to sender's channel
-      const result = await httpPost(
-        `${DAEMON_URL}/sessions/${encodeURIComponent(sender.from_id)}/message`,
-        { text: args.text, from_session: sessionId },
-      )
-      if (result.ok) {
-        return { content: [{ type: 'text', text: `reply sent to ${sender.from_name || sender.from_id}` }] }
+      try {
+        const result = await httpPost(
+          `${DAEMON_URL}/sessions/${encodeURIComponent(sender.from_id)}/message`,
+          { text: args.text, from_session: sessionId },
+        )
+        if (result.ok) {
+          return { content: [{ type: 'text', text: `reply sent to ${sender.from_name || sender.from_id}` }] }
+        }
+        return { content: [{ type: 'text', text: `reply could not be delivered to ${sender.from_name || sender.from_id}: ${result.body || result.error}. The sender may not have a channel.` }] }
+      } catch (err) {
+        return { content: [{ type: 'text', text: `reply routing error: ${err.message}. SSE-only reply emitted.` }] }
       }
-      return { content: [{ type: 'text', text: `reply failed: ${result.body || result.error}` }], isError: true }
     }
 
     // No sender info — SSE-only reply (external consumer)
@@ -213,25 +225,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (name === 'message') {
-    const result = await httpPost(
-      `${DAEMON_URL}/sessions/${encodeURIComponent(args.to)}/message`,
-      { text: args.text, from_session: sessionId },
-    )
-    if (result.ok) {
-      return { content: [{ type: 'text', text: `message sent to ${args.to}` }] }
-    }
     try {
-      const detail = JSON.parse(result.body).detail
-      return { content: [{ type: 'text', text: `error: ${detail}` }], isError: true }
-    } catch {
-      return { content: [{ type: 'text', text: `error: ${result.error || result.body}` }], isError: true }
+      const result = await httpPost(
+        `${DAEMON_URL}/sessions/${encodeURIComponent(args.to)}/message`,
+        { text: args.text, from_session: sessionId },
+      )
+      if (result.ok) {
+        return { content: [{ type: 'text', text: `message sent to ${args.to}` }] }
+      }
+      try {
+        const detail = JSON.parse(result.body).detail
+        return { content: [{ type: 'text', text: `could not send: ${detail}` }] }
+      } catch {
+        return { content: [{ type: 'text', text: `could not send: ${result.error || result.body}` }] }
+      }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `message error: ${err.message}` }] }
     }
   }
 
   if (name === 'sessions') {
     const result = await httpGet(`${DAEMON_URL}/sessions`)
     if (!result.ok) {
-      return { content: [{ type: 'text', text: `daemon unreachable: ${result.error}` }], isError: true }
+      return { content: [{ type: 'text', text: `daemon unreachable: ${result.error}` }] }
     }
     try {
       const sessions = JSON.parse(result.body)
@@ -249,8 +265,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   throw new Error(`unknown tool: ${name}`)
 })
 
+// --- Handle unexpected notifications from Claude ---
+mcp.fallbackNotificationHandler = async (notification) => {
+  log(`unhandled notification: ${JSON.stringify(notification)}`)
+}
+
 // --- Connect to Claude Code over stdio ---
-await mcp.connect(new StdioServerTransport())
+// Claude sends responses to channel notifications that the MCP SDK can't validate
+// (Zod error), which kills the transport. Suppress errors to keep alive.
+mcp.onerror = (err) => {
+  log(`mcp error (suppressed): ${String(err?.message || err).slice(0, 150)}`)
+}
+const transport = new StdioServerTransport()
+await mcp.connect(transport)
+// After handshake completes, suppress transport errors to prevent close on Zod failures.
+// The SDK wraps transport.onerror during connect — delay override so initial setup works.
+setTimeout(() => {
+  transport.onerror = (err) => {
+    log(`transport error (suppressed): ${String(err?.message || err).slice(0, 150)}`)
+  }
+}, 1000)
 
 // --- HTTP channel server ---
 let nextId = 1
@@ -310,13 +344,17 @@ const httpServer = http.createServer(async (req, res) => {
       content = `[from ${fromId.slice(0, 8)}] ${text}`
     }
 
-    await mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content,
-        meta: { chat_id, from_name: fromName, from_id: fromId, path: url.pathname },
-      },
-    })
+    try {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content,
+          meta: { chat_id, from_name: fromName, from_id: fromId, path: url.pathname },
+        },
+      })
+    } catch (err) {
+      log(`notification error: ${err}`)
+    }
     res.writeHead(200)
     res.end(`ok (chat_id: ${chat_id})`)
     return
