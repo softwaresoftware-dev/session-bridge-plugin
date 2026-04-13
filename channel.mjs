@@ -10,8 +10,8 @@
  *
  * Provides:
  *   - MCP server with claude/channel capability (stdio transport)
- *   - HTTP POST  /         — push message into this Claude session
- *   - GET        /events   — SSE stream of replies
+ *   - HTTP POST  /         — push message into this Claude session (JSON: {text, from_name, from_id})
+ *   - GET        /events   — SSE stream of outbound messages
  *   - GET        /health   — health check
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -80,22 +80,32 @@ function findFreePort() {
   })
 }
 
-// --- Register with daemon ---
+// --- HTTP helpers ---
 
-async function registerWithDaemon(sessionId, pid, channelPort) {
-  const body = JSON.stringify({ session_id: sessionId, pid, channel_port: channelPort })
+function httpPost(url, jsonBody) {
+  const body = JSON.stringify(jsonBody)
   return new Promise((resolve) => {
-    const req = http.request(`${DAEMON_URL}/register`, {
+    const req = http.request(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 5000,
+      timeout: 10000,
     }, (res) => {
       let data = ''
       res.on('data', (c) => data += c)
-      res.on('end', () => resolve({ ok: res.statusCode === 200, body: data }))
+      res.on('end', () => resolve({ ok: res.statusCode === 200, status: res.statusCode, body: data }))
     })
     req.on('error', (e) => resolve({ ok: false, error: e.message }))
     req.end(body)
+  })
+}
+
+function httpGet(url) {
+  return new Promise((resolve) => {
+    http.get(url, { timeout: 5000 }, (res) => {
+      let data = ''
+      res.on('data', (c) => data += c)
+      res.on('end', () => resolve({ ok: res.statusCode === 200, body: data }))
+    }).on('error', (e) => resolve({ ok: false, error: e.message }))
   })
 }
 
@@ -107,15 +117,17 @@ const sessionId = sessionInfo?.sessionId
 
 if (!sessionId) {
   log(`could not find session ID (claude pid: ${claudePid})`)
-  // Continue anyway — channel still works, just can't register
 }
 
-// --- Outbound: SSE listeners for replies ---
+// --- Outbound: SSE listeners ---
 const listeners = new Set()
-function send(text) {
+function emitSSE(text) {
   const chunk = text.split('\n').map(l => `data: ${l}\n`).join('') + '\n'
   for (const emit of listeners) emit(chunk)
 }
+
+// --- Track inbound message senders for reply routing ---
+const chatSenders = new Map()  // chat_id -> { from_name, from_id }
 
 // --- MCP Server with channel capability ---
 const serverName = sessionId ? `session-${sessionId.slice(0, 8)}` : 'session-proxy'
@@ -129,9 +141,14 @@ const mcp = new Server(
     },
     instructions: [
       `You are part of a session mesh. Your session ID is ${sessionId || 'unknown'}.`,
-      'Messages arrive as <channel> notifications from other Claude sessions or external systems.',
-      'Use the reply tool to send responses back to the sender.',
-      'Use the message tool to send messages to other sessions in the mesh.',
+      'Messages from other sessions arrive as <channel> notifications.',
+      'The notification content includes who sent it (from_name, from_id).',
+      '',
+      'To respond to a message, use the reply tool with the chat_id from the notification.',
+      'The reply is automatically routed back to the sender session.',
+      '',
+      'To initiate a conversation with another session, use the message tool.',
+      'Use the sessions tool to see who is in the mesh.',
     ].join('\n'),
   },
 )
@@ -141,11 +158,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
-      description: 'Reply to an inbound channel message',
+      description: 'Reply to a message from another session. Routes back to the sender automatically.',
       inputSchema: {
         type: 'object',
         properties: {
-          chat_id: { type: 'string', description: 'The chat_id from the inbound channel tag' },
+          chat_id: { type: 'string', description: 'The chat_id from the inbound channel notification' },
           text: { type: 'string', description: 'The reply message' },
         },
         required: ['chat_id', 'text'],
@@ -153,7 +170,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'message',
-      description: 'Send a message to another Claude session via session-proxy. Use session name or UUID prefix.',
+      description: 'Send a message to another Claude session. Use session name or UUID prefix.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -175,55 +192,58 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params
 
   if (name === 'reply') {
-    send(`[${args.chat_id}] ${args.text}`)
-    return { content: [{ type: 'text', text: 'sent' }] }
+    const sender = chatSenders.get(args.chat_id)
+    // Also emit to SSE for external consumers
+    emitSSE(`[${args.chat_id}] ${args.text}`)
+
+    if (sender?.from_id) {
+      // Route reply back through daemon to sender's channel
+      const result = await httpPost(
+        `${DAEMON_URL}/sessions/${encodeURIComponent(sender.from_id)}/message`,
+        { text: args.text, from_session: sessionId },
+      )
+      if (result.ok) {
+        return { content: [{ type: 'text', text: `reply sent to ${sender.from_name || sender.from_id}` }] }
+      }
+      return { content: [{ type: 'text', text: `reply failed: ${result.body || result.error}` }], isError: true }
+    }
+
+    // No sender info — SSE-only reply (external consumer)
+    return { content: [{ type: 'text', text: 'reply sent (SSE only — no sender to route back to)' }] }
   }
 
   if (name === 'message') {
-    const body = JSON.stringify({ text: args.text })
-    return new Promise((resolve) => {
-      const r = http.request(`${DAEMON_URL}/sessions/${encodeURIComponent(args.to)}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 10000,
-      }, (res) => {
-        let data = ''
-        res.on('data', (c) => data += c)
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            resolve({ content: [{ type: 'text', text: `message sent to ${args.to}` }] })
-          } else {
-            const detail = JSON.parse(data).detail || data
-            resolve({ content: [{ type: 'text', text: `error: ${detail}` }], isError: true })
-          }
-        })
-      })
-      r.on('error', (e) => resolve({ content: [{ type: 'text', text: `error: ${e.message}` }], isError: true }))
-      r.end(body)
-    })
+    const result = await httpPost(
+      `${DAEMON_URL}/sessions/${encodeURIComponent(args.to)}/message`,
+      { text: args.text, from_session: sessionId },
+    )
+    if (result.ok) {
+      return { content: [{ type: 'text', text: `message sent to ${args.to}` }] }
+    }
+    try {
+      const detail = JSON.parse(result.body).detail
+      return { content: [{ type: 'text', text: `error: ${detail}` }], isError: true }
+    } catch {
+      return { content: [{ type: 'text', text: `error: ${result.error || result.body}` }], isError: true }
+    }
   }
 
   if (name === 'sessions') {
-    return new Promise((resolve) => {
-      http.get(`${DAEMON_URL}/sessions`, { timeout: 5000 }, (res) => {
-        let data = ''
-        res.on('data', (c) => data += c)
-        res.on('end', () => {
-          try {
-            const sessions = JSON.parse(data)
-            const lines = sessions.map(s => {
-              const ch = s.channel_port ? `ch:${s.channel_port}` : 'no-channel'
-              return `${s.name} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}`
-            })
-            resolve({ content: [{ type: 'text', text: lines.join('\n') || 'no sessions found' }] })
-          } catch {
-            resolve({ content: [{ type: 'text', text: data }] })
-          }
-        })
-      }).on('error', (e) => {
-        resolve({ content: [{ type: 'text', text: `daemon unreachable: ${e.message}` }], isError: true })
+    const result = await httpGet(`${DAEMON_URL}/sessions`)
+    if (!result.ok) {
+      return { content: [{ type: 'text', text: `daemon unreachable: ${result.error}` }], isError: true }
+    }
+    try {
+      const sessions = JSON.parse(result.body)
+      const lines = sessions.map(s => {
+        const ch = s.channel_port ? `ch:${s.channel_port}` : 'no-channel'
+        const me = s.session_id === sessionId ? ' (you)' : ''
+        return `${s.name} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${me}`
       })
-    })
+      return { content: [{ type: 'text', text: lines.join('\n') || 'no sessions found' }] }
+    } catch {
+      return { content: [{ type: 'text', text: result.body }] }
+    }
   }
 
   throw new Error(`unknown tool: ${name}`)
@@ -262,14 +282,39 @@ const httpServer = http.createServer(async (req, res) => {
   if (req.method === 'POST') {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
-    const body = Buffer.concat(chunks).toString()
+    const raw = Buffer.concat(chunks).toString()
+
+    // Parse JSON envelope from daemon, fall back to plain text
+    let text, fromName, fromId
+    try {
+      const msg = JSON.parse(raw)
+      text = msg.text || raw
+      fromName = msg.from_name || null
+      fromId = msg.from_id || null
+    } catch {
+      text = raw
+    }
 
     const chat_id = String(nextId++)
+
+    // Store sender info so reply can route back
+    if (fromId) {
+      chatSenders.set(chat_id, { from_name: fromName, from_id: fromId })
+    }
+
+    // Build content with sender attribution
+    let content = text
+    if (fromName) {
+      content = `[from ${fromName}] ${text}`
+    } else if (fromId) {
+      content = `[from ${fromId.slice(0, 8)}] ${text}`
+    }
+
     await mcp.notification({
       method: 'notifications/claude/channel',
       params: {
-        content: body,
-        meta: { chat_id, path: url.pathname },
+        content,
+        meta: { chat_id, from_name: fromName, from_id: fromId, path: url.pathname },
       },
     })
     res.writeHead(200)
@@ -285,11 +330,13 @@ httpServer.listen(port, '127.0.0.1', async () => {
   log(`channel listening on port ${port}`)
 
   if (sessionId) {
-    const result = await registerWithDaemon(sessionId, claudePid, port)
+    const result = await httpPost(`${DAEMON_URL}/register`, {
+      session_id: sessionId, pid: claudePid, channel_port: port,
+    })
     if (result.ok) {
       log(`registered with daemon (session: ${sessionId.slice(0, 8)}, port: ${port})`)
     } else {
-      log(`daemon registration failed: ${result.error || result.body} — will retry on next poll`)
+      log(`daemon registration failed: ${result.error || result.body}`)
     }
   }
 })
