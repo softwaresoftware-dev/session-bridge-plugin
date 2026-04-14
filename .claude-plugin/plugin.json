@@ -1,16 +1,16 @@
 {
-  "name": "session-proxy",
-  "description": "Channel MCP for session-proxy mesh — enables bidirectional communication between Claude sessions.",
+  "name": "session-bridge",
+  "description": "Channel MCP for session-bridge mesh — enables bidirectional communication between Claude sessions.",
   "version": "0.1.0",
   "author": {
     "name": "Thatcher",
     "url": "https://github.com/softwaresoftware-dev"
   },
-  "repository": "https://github.com/softwaresoftware-dev/session-proxy-plugin",
+  "repository": "https://github.com/softwaresoftware-dev/session-bridge-plugin",
   "license": "MIT",
   "keywords": ["session", "channel", "mesh", "communication"],
   "mcpServers": {
-    "session-proxy": {
+    "session-bridge": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/channel.mjs"],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"

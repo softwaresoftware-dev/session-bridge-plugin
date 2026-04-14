@@ -6,7 +6,7 @@
  *   1. Walks process tree to find parent claude PID
  *   2. Reads ~/.claude/sessions/{pid}.json for session UUID
  *   3. Picks a free port and starts HTTP channel server
- *   4. Registers with session-proxy daemon at :8910
+ *   4. Registers with session-bridge daemon at :8910
  *
  * Provides:
  *   - MCP server with claude/channel capability (stdio transport)
@@ -29,7 +29,7 @@ import net from 'node:net'
 const DAEMON_URL = 'http://127.0.0.1:8910'
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions')
 
-const log = (msg) => process.stderr.write(`[session-proxy] ${msg}\n`)
+const log = (msg) => process.stderr.write(`[session-bridge] ${msg}\n`)
 
 // Prevent unhandled rejections from crashing the process
 process.on('unhandledRejection', (err) => log(`unhandled rejection: ${err}`))
@@ -138,7 +138,7 @@ function emitSSE(text) {
 const chatSenders = new Map()  // chat_id -> { from_name, from_id }
 
 // --- MCP Server with channel capability ---
-const serverName = 'session-proxy'
+const serverName = 'session-bridge'
 
 const mcp = new Server(
   { name: serverName, version: '0.1.0' },
@@ -154,7 +154,7 @@ const mcp = new Server(
       '',
       'IMPORTANT: After your first interaction with the user, use the set_name tool to give',
       'this session a short, descriptive name based on what the user is working on.',
-      'Examples: "beats-dj", "gmail-filters", "lawn-care", "session-proxy-dev".',
+      'Examples: "beats-dj", "gmail-filters", "lawn-care", "session-bridge-dev".',
       'Keep it to 1-3 words, lowercase, hyphenated. This helps other sessions find you.',
       '',
       'To respond to a message, use the reply tool with the chat_id from the notification.',
