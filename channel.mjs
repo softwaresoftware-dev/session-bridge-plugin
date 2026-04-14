@@ -152,6 +152,11 @@ const mcp = new Server(
       'Messages from other sessions arrive as <channel> notifications.',
       'The notification content includes who sent it (from_name, from_id).',
       '',
+      'IMPORTANT: After your first interaction with the user, use the set_name tool to give',
+      'this session a short, descriptive name based on what the user is working on.',
+      'Examples: "beats-dj", "gmail-filters", "lawn-care", "session-proxy-dev".',
+      'Keep it to 1-3 words, lowercase, hyphenated. This helps other sessions find you.',
+      '',
       'To respond to a message, use the reply tool with the chat_id from the notification.',
       'The reply is automatically routed back to the sender session.',
       '',
@@ -186,6 +191,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string', description: 'The message to send' },
         },
         required: ['to', 'text'],
+      },
+    },
+    {
+      name: 'set_name',
+      description: 'Set a short name for this session in the mesh. Call after your first interaction with the user.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Short descriptive name, 1-3 words, lowercase hyphenated (e.g. "beats-dj", "gmail-filters")' },
+        },
+        required: ['name'],
       },
     },
     {
@@ -242,6 +258,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     } catch (err) {
       return { content: [{ type: 'text', text: `message error: ${err.message}` }] }
     }
+  }
+
+  if (name === 'set_name') {
+    if (!sessionId) {
+      return { content: [{ type: 'text', text: 'cannot set name — session ID unknown' }] }
+    }
+    const result = await httpPost(`${DAEMON_URL}/name`, { session_id: sessionId, name: args.name })
+    if (result.ok) {
+      return { content: [{ type: 'text', text: `session named "${args.name}"` }] }
+    }
+    return { content: [{ type: 'text', text: `naming failed: ${result.error || result.body}` }] }
   }
 
   if (name === 'sessions') {
