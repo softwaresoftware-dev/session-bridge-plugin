@@ -68,6 +68,19 @@ function findClaudePid() {
   return null
 }
 
+function readCmdlineArgs(pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean)
+  } catch { return [] }
+}
+
+function parseNameFlag(pid) {
+  const argv = readCmdlineArgs(pid)
+  const idx = argv.indexOf('--name')
+  if (idx >= 0 && argv[idx + 1]) return argv[idx + 1]
+  return null
+}
+
 function readSessionInfo(claudePid) {
   const sessionFile = path.join(SESSIONS_DIR, `${claudePid}.json`)
   try {
@@ -122,9 +135,13 @@ function httpGet(url) {
 const claudePid = findClaudePid()
 const sessionInfo = claudePid ? readSessionInfo(claudePid) : null
 const sessionId = sessionInfo?.sessionId
+const initialName = claudePid ? parseNameFlag(claudePid) : null
 
 if (!sessionId) {
   log(`could not find session ID (claude pid: ${claudePid})`)
+}
+if (initialName) {
+  log(`initial name from claude --name: ${initialName}`)
 }
 
 // --- Outbound: SSE listeners ---
@@ -149,13 +166,9 @@ const mcp = new Server(
     },
     instructions: [
       `You are part of a session mesh. Your session ID is ${sessionId || 'unknown'}.`,
+      `Your session name is "${initialName || 'unset'}" (derived from claude --name at launch).`,
       'Messages from other sessions arrive as <channel> notifications.',
       'The notification content includes who sent it (from_name, from_id).',
-      '',
-      'IMPORTANT: After your first interaction with the user, use the set_name tool to give',
-      'this session a short, descriptive name based on what the user is working on.',
-      'Examples: "beats-dj", "gmail-filters", "lawn-care", "session-bridge-dev".',
-      'Keep it to 1-3 words, lowercase, hyphenated. This helps other sessions find you.',
       '',
       'To respond to a message, use the reply tool with the chat_id from the notification.',
       'The reply is automatically routed back to the sender session.',
@@ -191,17 +204,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string', description: 'The message to send' },
         },
         required: ['to', 'text'],
-      },
-    },
-    {
-      name: 'set_name',
-      description: 'Set a short name for this session in the mesh. Call after your first interaction with the user.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Short descriptive name, 1-3 words, lowercase hyphenated (e.g. "beats-dj", "gmail-filters")' },
-        },
-        required: ['name'],
       },
     },
     {
@@ -258,17 +260,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     } catch (err) {
       return { content: [{ type: 'text', text: `message error: ${err.message}` }] }
     }
-  }
-
-  if (name === 'set_name') {
-    if (!sessionId) {
-      return { content: [{ type: 'text', text: 'cannot set name — session ID unknown' }] }
-    }
-    const result = await httpPost(`${DAEMON_URL}/name`, { session_id: sessionId, name: args.name })
-    if (result.ok) {
-      return { content: [{ type: 'text', text: `session named "${args.name}"` }] }
-    }
-    return { content: [{ type: 'text', text: `naming failed: ${result.error || result.body}` }] }
   }
 
   if (name === 'sessions') {
@@ -390,11 +381,11 @@ httpServer.listen(port, '127.0.0.1', async () => {
   log(`channel listening on port ${port}`)
 
   if (sessionId) {
-    const result = await httpPost(`${DAEMON_URL}/register`, {
-      session_id: sessionId, pid: claudePid, channel_port: port,
-    })
+    const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
+    if (initialName) payload.name = initialName
+    const result = await httpPost(`${DAEMON_URL}/register`, payload)
     if (result.ok) {
-      log(`registered with daemon (session: ${sessionId.slice(0, 8)}, port: ${port})`)
+      log(`registered with daemon (session: ${sessionId.slice(0, 8)}, port: ${port}${initialName ? `, name: ${initialName}` : ''})`)
     } else {
       log(`daemon registration failed: ${result.error || result.body}`)
     }
