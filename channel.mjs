@@ -137,11 +137,27 @@ const sessionInfo = claudePid ? readSessionInfo(claudePid) : null
 const sessionId = sessionInfo?.sessionId
 const initialName = claudePid ? parseNameFlag(claudePid) : null
 
+// SESSION_NAMESPACE / SESSION_LABELS come from the parent process env
+// (e.g. taskpilot exports them when spawning a managed agent). They are
+// read here so the daemon can scope name lookups by namespace and run
+// label-based selectors. Both are optional.
+const initialNamespace = (process.env.SESSION_NAMESPACE || '').trim() || null
+const initialLabels = (process.env.SESSION_LABELS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+
 if (!sessionId) {
   log(`could not find session ID (claude pid: ${claudePid})`)
 }
 if (initialName) {
   log(`initial name from claude --name: ${initialName}`)
+}
+if (initialNamespace) {
+  log(`initial namespace from SESSION_NAMESPACE: ${initialNamespace}`)
+}
+if (initialLabels.length) {
+  log(`initial labels from SESSION_LABELS: ${initialLabels.join(',')}`)
 }
 
 // --- Outbound: SSE listeners ---
@@ -383,9 +399,18 @@ httpServer.listen(port, '127.0.0.1', async () => {
   if (sessionId) {
     const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
     if (initialName) payload.name = initialName
+    if (initialNamespace) payload.namespace = initialNamespace
+    if (initialLabels.length) payload.labels = initialLabels
     const result = await httpPost(`${DAEMON_URL}/register`, payload)
     if (result.ok) {
-      log(`registered with daemon (session: ${sessionId.slice(0, 8)}, port: ${port}${initialName ? `, name: ${initialName}` : ''})`)
+      const parts = [
+        `session: ${sessionId.slice(0, 8)}`,
+        `port: ${port}`,
+        initialName && `name: ${initialName}`,
+        initialNamespace && `namespace: ${initialNamespace}`,
+        initialLabels.length && `labels: ${initialLabels.join(',')}`,
+      ].filter(Boolean)
+      log(`registered with daemon (${parts.join(', ')})`)
     } else {
       log(`daemon registration failed: ${result.error || result.body}`)
     }
