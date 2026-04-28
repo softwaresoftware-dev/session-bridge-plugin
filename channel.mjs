@@ -393,26 +393,61 @@ const httpServer = http.createServer(async (req, res) => {
   res.end('not found')
 })
 
+// Build the /register payload once; reused at boot and on every heartbeat
+// re-registration when the daemon has lost our entry (restart, crash, etc).
+function buildRegisterPayload() {
+  const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
+  if (initialName) payload.name = initialName
+  if (initialNamespace) payload.namespace = initialNamespace
+  if (initialLabels.length) payload.labels = initialLabels
+  return payload
+}
+
+async function registerWithDaemon(reason) {
+  const result = await httpPost(`${DAEMON_URL}/register`, buildRegisterPayload())
+  if (result.ok) {
+    const parts = [
+      `session: ${sessionId.slice(0, 8)}`,
+      `port: ${port}`,
+      initialName && `name: ${initialName}`,
+      initialNamespace && `namespace: ${initialNamespace}`,
+      initialLabels.length && `labels: ${initialLabels.join(',')}`,
+    ].filter(Boolean)
+    log(`${reason} (${parts.join(', ')})`)
+    return true
+  }
+  log(`registration failed (${reason}): ${result.error || result.body}`)
+  return false
+}
+
+// Heartbeat: ask the daemon if it still knows us. If it 404s, re-register.
+// Catches the orphan-on-daemon-restart case — channel.mjs only registered at
+// boot historically, so a daemon restart left every live session unreachable
+// until each was manually relaunched.
+const HEARTBEAT_INTERVAL_MS = 30_000
+
+async function heartbeat() {
+  if (!sessionId) return
+  const result = await httpGet(`${DAEMON_URL}/sessions/${encodeURIComponent(sessionId)}`)
+  if (result.ok) return
+  // 404 → daemon never saw or has forgotten this session. Anything else
+  // (network blip, 5xx) we let the next tick handle.
+  if (result.error || !result.body) return
+  try {
+    const status = JSON.parse(result.body)
+    if (status?.detail?.includes('not found')) {
+      await registerWithDaemon('re-registered after daemon forget')
+    }
+  } catch {
+    // body wasn't JSON — daemon may be transitioning. Try again next tick.
+  }
+}
+
 httpServer.listen(port, '127.0.0.1', async () => {
   log(`channel listening on port ${port}`)
 
   if (sessionId) {
-    const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
-    if (initialName) payload.name = initialName
-    if (initialNamespace) payload.namespace = initialNamespace
-    if (initialLabels.length) payload.labels = initialLabels
-    const result = await httpPost(`${DAEMON_URL}/register`, payload)
-    if (result.ok) {
-      const parts = [
-        `session: ${sessionId.slice(0, 8)}`,
-        `port: ${port}`,
-        initialName && `name: ${initialName}`,
-        initialNamespace && `namespace: ${initialNamespace}`,
-        initialLabels.length && `labels: ${initialLabels.join(',')}`,
-      ].filter(Boolean)
-      log(`registered with daemon (${parts.join(', ')})`)
-    } else {
-      log(`daemon registration failed: ${result.error || result.body}`)
-    }
+    await registerWithDaemon('registered with daemon')
+    setInterval(heartbeat, HEARTBEAT_INTERVAL_MS)
   }
 })
