@@ -130,6 +130,16 @@ function httpGet(url) {
   })
 }
 
+// Format a daemon error response for an MCP tool reply. Tries the FastAPI
+// `{detail: "..."}` body first, falls back to raw body or transport error.
+function formatDaemonError(prefix, result) {
+  try {
+    const detail = JSON.parse(result.body).detail
+    if (detail) return `${prefix}: ${detail}`
+  } catch {}
+  return `${prefix}: ${result.error || result.body || 'unknown error'}`
+}
+
 // --- Boot ---
 
 const claudePid = findClaudePid()
@@ -301,12 +311,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (result.ok) {
         return { content: [{ type: 'text', text: `message sent to ${args.to}` }] }
       }
-      try {
-        const detail = JSON.parse(result.body).detail
-        return { content: [{ type: 'text', text: `could not send: ${detail}` }] }
-      } catch {
-        return { content: [{ type: 'text', text: `could not send: ${result.error || result.body}` }] }
-      }
+      return { content: [{ type: 'text', text: formatDaemonError('could not send', result) }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `message error: ${err.message}` }] }
     }
@@ -320,12 +325,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const url = qs ? `${DAEMON_URL}/sessions?${qs}` : `${DAEMON_URL}/sessions`
     const result = await httpGet(url)
     if (!result.ok) {
-      try {
-        const detail = JSON.parse(result.body).detail
-        return { content: [{ type: 'text', text: `could not list: ${detail}` }] }
-      } catch {
-        return { content: [{ type: 'text', text: `daemon unreachable: ${result.error || result.body}` }] }
-      }
+      return { content: [{ type: 'text', text: formatDaemonError('could not list', result) }] }
     }
     try {
       const sessions = JSON.parse(result.body)
@@ -351,12 +351,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (result.ok) {
       return { content: [{ type: 'text', text: `labels set on ${target.slice(0, 8)}: ${args.labels.join(', ') || '(empty)'}` }] }
     }
-    try {
-      const detail = JSON.parse(result.body).detail
-      return { content: [{ type: 'text', text: `could not set labels: ${detail}` }] }
-    } catch {
-      return { content: [{ type: 'text', text: `could not set labels: ${result.error || result.body}` }] }
-    }
+    return { content: [{ type: 'text', text: formatDaemonError('could not set labels', result) }] }
   }
 
   if (name === 'broadcast') {
@@ -365,12 +360,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (args.namespace) payload.namespace = args.namespace
     const result = await httpPost(`${DAEMON_URL}/broadcast`, payload)
     if (!result.ok) {
-      try {
-        const detail = JSON.parse(result.body).detail
-        return { content: [{ type: 'text', text: `broadcast failed: ${detail}` }] }
-      } catch {
-        return { content: [{ type: 'text', text: `broadcast failed: ${result.error || result.body}` }] }
-      }
+      return { content: [{ type: 'text', text: formatDaemonError('broadcast failed', result) }] }
     }
     try {
       const body = JSON.parse(result.body)
