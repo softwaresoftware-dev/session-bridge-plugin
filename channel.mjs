@@ -183,6 +183,7 @@ const mcp = new Server(
     instructions: [
       `You are part of a session mesh. Your session ID is ${sessionId || 'unknown'}.`,
       `Your session name is "${initialName || 'unset'}" (derived from claude --name at launch).`,
+      initialNamespace ? `Your namespace is "${initialNamespace}". Address sessions in your namespace as "name.${initialNamespace}".` : 'You have no namespace assigned.',
       'Messages from other sessions arrive as <channel> notifications.',
       'The notification content includes who sent it (from_name, from_id).',
       '',
@@ -190,7 +191,9 @@ const mcp = new Server(
       'The reply is automatically routed back to the sender session.',
       '',
       'To initiate a conversation with another session, use the message tool.',
-      'Use the sessions tool to see who is in the mesh.',
+      'Use the sessions tool to see who is in the mesh — supports namespace and label-selector filters.',
+      'Use the label tool to tag this session (or another) with key:value labels.',
+      'Use the broadcast tool to message every session matching a selector (e.g. "kind:service").',
     ].join('\n'),
   },
 )
@@ -224,8 +227,39 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sessions',
-      description: 'List all Claude sessions in the mesh',
-      inputSchema: { type: 'object', properties: {} },
+      description: 'List Claude sessions in the mesh. Optionally filter by namespace and/or label selector.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          namespace: { type: 'string', description: 'Restrict to a specific namespace (e.g. "taskpilot")' },
+          selector: { type: 'string', description: 'Comma-separated key:value label selector (AND), e.g. "kind:service,tier:critical"' },
+        },
+      },
+    },
+    {
+      name: 'label',
+      description: 'Replace the labels on a session. Each label is a "key:value" string.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'Target session UUID; defaults to this session' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Full label set to apply (replaces existing)' },
+        },
+        required: ['labels'],
+      },
+    },
+    {
+      name: 'broadcast',
+      description: 'Send a message to every session matching a label selector and/or namespace.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The message to send' },
+          selector: { type: 'string', description: 'Comma-separated key:value label selector (AND)' },
+          namespace: { type: 'string', description: 'Restrict to a namespace' },
+        },
+        required: ['text'],
+      },
     },
   ],
 }))
@@ -279,18 +313,73 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (name === 'sessions') {
-    const result = await httpGet(`${DAEMON_URL}/sessions`)
+    const params = new URLSearchParams()
+    if (args?.namespace) params.set('namespace', args.namespace)
+    if (args?.selector) params.set('selector', args.selector)
+    const qs = params.toString()
+    const url = qs ? `${DAEMON_URL}/sessions?${qs}` : `${DAEMON_URL}/sessions`
+    const result = await httpGet(url)
     if (!result.ok) {
-      return { content: [{ type: 'text', text: `daemon unreachable: ${result.error}` }] }
+      try {
+        const detail = JSON.parse(result.body).detail
+        return { content: [{ type: 'text', text: `could not list: ${detail}` }] }
+      } catch {
+        return { content: [{ type: 'text', text: `daemon unreachable: ${result.error || result.body}` }] }
+      }
     }
     try {
       const sessions = JSON.parse(result.body)
       const lines = sessions.map(s => {
         const ch = s.channel_port ? `ch:${s.channel_port}` : 'no-channel'
+        const ns = s.namespace ? `${s.name}.${s.namespace}` : s.name
+        const labels = (s.labels && s.labels.length) ? ` [${s.labels.join(',')}]` : ''
         const me = s.session_id === sessionId ? ' (you)' : ''
-        return `${s.name} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${me}`
+        return `${ns} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${labels}${me}`
       })
       return { content: [{ type: 'text', text: lines.join('\n') || 'no sessions found' }] }
+    } catch {
+      return { content: [{ type: 'text', text: result.body }] }
+    }
+  }
+
+  if (name === 'label') {
+    const target = args.session_id || sessionId
+    if (!target) {
+      return { content: [{ type: 'text', text: 'no session_id available — pass one explicitly' }] }
+    }
+    const result = await httpPost(`${DAEMON_URL}/label`, { session_id: target, labels: args.labels })
+    if (result.ok) {
+      return { content: [{ type: 'text', text: `labels set on ${target.slice(0, 8)}: ${args.labels.join(', ') || '(empty)'}` }] }
+    }
+    try {
+      const detail = JSON.parse(result.body).detail
+      return { content: [{ type: 'text', text: `could not set labels: ${detail}` }] }
+    } catch {
+      return { content: [{ type: 'text', text: `could not set labels: ${result.error || result.body}` }] }
+    }
+  }
+
+  if (name === 'broadcast') {
+    const payload = { text: args.text, from_session: sessionId }
+    if (args.selector) payload.selector = args.selector
+    if (args.namespace) payload.namespace = args.namespace
+    const result = await httpPost(`${DAEMON_URL}/broadcast`, payload)
+    if (!result.ok) {
+      try {
+        const detail = JSON.parse(result.body).detail
+        return { content: [{ type: 'text', text: `broadcast failed: ${detail}` }] }
+      } catch {
+        return { content: [{ type: 'text', text: `broadcast failed: ${result.error || result.body}` }] }
+      }
+    }
+    try {
+      const body = JSON.parse(result.body)
+      const summary = `broadcast: ${body.sent}/${body.matched} delivered`
+      const skipped = body.deliveries.filter(d => d.status !== 'sent')
+      const detail = skipped.length
+        ? '\n' + skipped.map(d => `  ${d.name} — ${d.status}${d.reason ? ' (' + d.reason + ')' : ''}`).join('\n')
+        : ''
+      return { content: [{ type: 'text', text: summary + detail }] }
     } catch {
       return { content: [{ type: 'text', text: result.body }] }
     }
