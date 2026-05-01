@@ -499,26 +499,34 @@ async function registerWithDaemon(reason) {
   return false
 }
 
-// Heartbeat: ask the daemon if it still knows us. If it 404s, re-register.
-// Catches the orphan-on-daemon-restart case — channel.mjs only registered at
-// boot historically, so a daemon restart left every live session unreachable
-// until each was manually relaunched.
+// Heartbeat: ask the daemon if it still knows us. Re-register when:
+//   - daemon 404s the session (never saw us, or fully forgot)
+//   - daemon 200s but channel_port is null (rediscovered the session from
+//     ~/.claude/sessions/{pid}.json after a bounce, but lost the port —
+//     the registration step is what carries the port, and the daemon does
+//     not persist it)
+// Anything else (network blip, 5xx, malformed body) we let the next tick handle.
 const HEARTBEAT_INTERVAL_MS = 30_000
 
 async function heartbeat() {
   if (!sessionId) return
   const result = await httpGet(`${DAEMON_URL}/sessions/${encodeURIComponent(sessionId)}`)
-  if (result.ok) return
-  // 404 → daemon never saw or has forgotten this session. Anything else
-  // (network blip, 5xx) we let the next tick handle.
-  if (result.error || !result.body) return
+  if (result.error) return
+  if (!result.body) return
+  let parsed
   try {
-    const status = JSON.parse(result.body)
-    if (status?.detail?.includes('not found')) {
-      await registerWithDaemon('re-registered after daemon forget')
-    }
+    parsed = JSON.parse(result.body)
   } catch {
-    // body wasn't JSON — daemon may be transitioning. Try again next tick.
+    return
+  }
+  if (result.ok) {
+    if (parsed?.channel_port == null) {
+      await registerWithDaemon('re-registered after daemon rediscovered without channel')
+    }
+    return
+  }
+  if (parsed?.detail?.includes('not found')) {
+    await registerWithDaemon('re-registered after daemon forget')
   }
 }
 
