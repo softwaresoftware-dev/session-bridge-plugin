@@ -7,7 +7,6 @@
     "url": "https://github.com/softwaresoftware-dev"
   },
   "repository": "https://github.com/softwaresoftware-dev/session-bridge-plugin",
-  "license": "MIT",
   "keywords": ["session", "channel", "mesh", "communication"],
   "mcpServers": {
     "session-bridge": {
