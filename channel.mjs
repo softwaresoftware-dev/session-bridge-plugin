@@ -68,19 +68,6 @@ function findClaudePid() {
   return null
 }
 
-function readCmdlineArgs(pid) {
-  try {
-    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean)
-  } catch { return [] }
-}
-
-function parseNameFlag(pid) {
-  const argv = readCmdlineArgs(pid)
-  const idx = argv.indexOf('--name')
-  if (idx >= 0 && argv[idx + 1]) return argv[idx + 1]
-  return null
-}
-
 function readSessionInfo(claudePid) {
   const sessionFile = path.join(SESSIONS_DIR, `${claudePid}.json`)
   try {
@@ -145,12 +132,15 @@ function formatDaemonError(prefix, result) {
 const claudePid = findClaudePid()
 const sessionInfo = claudePid ? readSessionInfo(claudePid) : null
 const sessionId = sessionInfo?.sessionId
-const initialName = claudePid ? parseNameFlag(claudePid) : null
 
-// SESSION_NAMESPACE / SESSION_LABELS come from the parent process env
-// (e.g. taskpilot exports them when spawning a managed agent). They are
-// read here so the daemon can scope name lookups by namespace and run
-// label-based selectors. Both are optional.
+// SESSION_NAME / SESSION_NAMESPACE / SESSION_LABELS come from the parent
+// process env (e.g. taskpilot exports them when spawning a managed agent,
+// or the user sets SESSION_NAME=foo before `claude`). They are read here
+// so the daemon can register a human-friendly name, scope lookups by
+// namespace, and run label-based selectors. All are optional. Without a
+// SESSION_NAME, the daemon's discovery will derive a name from the cwd
+// basename, and the user can rename later via the label tool.
+const initialName = (process.env.SESSION_NAME || '').trim() || null
 const initialNamespace = (process.env.SESSION_NAMESPACE || '').trim() || null
 const initialLabels = (process.env.SESSION_LABELS || '')
   .split(',')
@@ -161,7 +151,7 @@ if (!sessionId) {
   log(`could not find session ID (claude pid: ${claudePid})`)
 }
 if (initialName) {
-  log(`initial name from claude --name: ${initialName}`)
+  log(`initial name from SESSION_NAME: ${initialName}`)
 }
 if (initialNamespace) {
   log(`initial namespace from SESSION_NAMESPACE: ${initialNamespace}`)
@@ -192,7 +182,9 @@ const mcp = new Server(
     },
     instructions: [
       `You are part of a session mesh. Your session ID is ${sessionId || 'unknown'}.`,
-      `Your session name is "${initialName || 'unset'}" (derived from claude --name at launch).`,
+      initialName
+        ? `Your session name is "${initialName}" (from the SESSION_NAME env var at launch).`
+        : 'Your session name is unset. The daemon will derive one from your cwd basename; rename anytime via the label tool.',
       initialNamespace ? `Your namespace is "${initialNamespace}". Address sessions in your namespace as "name.${initialNamespace}".` : 'You have no namespace assigned.',
       'Messages from other sessions arrive as <channel> notifications.',
       'The notification content includes who sent it (from_name, from_id).',
