@@ -25,6 +25,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
+import { randomUUID } from 'node:crypto'
 
 const DAEMON_URL = 'http://127.0.0.1:8910'
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions')
@@ -382,7 +383,6 @@ mcp.onerror = (err) => {
 await mcp.connect(new StdioServerTransport())
 
 // --- HTTP channel server ---
-let nextId = 1
 
 const port = await findFreePort()
 
@@ -424,7 +424,7 @@ const httpServer = http.createServer(async (req, res) => {
       text = raw
     }
 
-    const chat_id = String(nextId++)
+    const chat_id = randomUUID()
 
     // Store sender info so reply can route back
     if (fromId) {
@@ -439,21 +439,37 @@ const httpServer = http.createServer(async (req, res) => {
       content = `[from ${fromId.slice(0, 8)}] ${text}`
     }
 
-    try {
-      await mcp.notification({
-        method: 'notifications/claude/channel',
-        params: {
-          content,
-          meta: {
-            chat_id,
-            path: url.pathname,
-            ...(fromName && { from_name: fromName }),
-            ...(fromId && { from_id: fromId }),
-          },
+    // Bound the notification wait. Without this, a wedged claude stdio (the
+    // pipe backs up when the harness stops draining MCP traffic) hangs this
+    // POST handler indefinitely, which cascades: the daemon's 5s forward
+    // timeout fires, sender sees "channel error", and the failure is silent
+    // from the user's POV. 3s is generous for healthy stdio (sub-ms typical)
+    // and stays under the daemon's 5s ceiling so we still return 200 in time.
+    let notifyTimer
+    const notificationPromise = mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id,
+          path: url.pathname,
+          ...(fromName && { from_name: fromName }),
+          ...(fromId && { from_id: fromId }),
         },
-      })
+      },
+    })
+    const timeoutPromise = new Promise((_, reject) => {
+      notifyTimer = setTimeout(
+        () => reject(new Error('notification timeout (3s) — claude stdio wedged')),
+        3000,
+      )
+    })
+    try {
+      await Promise.race([notificationPromise, timeoutPromise])
     } catch (err) {
-      log(`notification error: ${err}`)
+      log(`notification error: ${err.message || err}`)
+    } finally {
+      clearTimeout(notifyTimer)
     }
     res.writeHead(200)
     res.end(`ok (chat_id: ${chat_id})`)
@@ -497,6 +513,14 @@ async function registerWithDaemon(reason) {
 //     ~/.claude/sessions/{pid}.json after a bounce, but lost the port —
 //     the registration step is what carries the port, and the daemon does
 //     not persist it)
+//   - daemon 200s with a DIFFERENT channel_port than ours: another process
+//     resolved to the same session_id and overwrote our registration. Last
+//     writer wins at /register today; this heartbeat reclaims the row so
+//     mis-routed traffic stops landing on the squatter. Symptom: senders
+//     POST messages, daemon forwards, the squatter swallows them, sender
+//     gets no reply. Caused by stray `node -e import('./channel.mjs')`
+//     instances or any other channel.mjs that walks back to the same
+//     parent claude when discovering its session.
 // Anything else (network blip, 5xx, malformed body) we let the next tick handle.
 const HEARTBEAT_INTERVAL_MS = 30_000
 
@@ -514,6 +538,8 @@ async function heartbeat() {
   if (result.ok) {
     if (parsed?.channel_port == null) {
       await registerWithDaemon('re-registered after daemon rediscovered without channel')
+    } else if (parsed.channel_port !== port) {
+      await registerWithDaemon(`re-registered after port mismatch (daemon=${parsed.channel_port}, mine=${port})`)
     }
     return
   }
