@@ -1,0 +1,9 @@
+[project]
+name = "session-bridge"
+version = "0.2.0"
+description = "Session mesh for Claude Code — discovery, monitoring, and control of Claude sessions"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]

@@ -91,3 +91,18 @@ def test_user_config_schema_strict(plugin_json):
             f"Allowed for type={entry.get('type')!r}: {sorted(allowed)}. "
             f"See https://code.claude.com/docs/en/plugins-reference.md#user-configuration"
         )
+
+
+def test_daemon_bundled():
+    """The plugin must ship the bridge daemon source so setup can install it without external deps."""
+    daemon_dir = os.path.join(ROOT, "daemon")
+    assert os.path.isdir(daemon_dir), "missing daemon/ directory"
+    assert os.path.isfile(os.path.join(daemon_dir, "run.py")), "missing daemon/run.py launcher"
+    assert os.path.isdir(os.path.join(daemon_dir, "app")), "missing daemon/app package"
+    assert os.path.isfile(os.path.join(daemon_dir, "app", "main.py")), "missing daemon/app/main.py"
+
+
+def test_setup_skill_present():
+    """The setup skill must exist so the post-install path can register the daemon."""
+    skill = os.path.join(ROOT, "skills", "setup", "SKILL.md")
+    assert os.path.isfile(skill), "missing skills/setup/SKILL.md"

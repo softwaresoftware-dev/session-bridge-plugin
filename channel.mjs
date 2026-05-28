@@ -171,11 +171,36 @@ function emitSSE(text) {
 // --- Track inbound message senders for reply routing ---
 const chatSenders = new Map()  // chat_id -> { from_name, from_id }
 
+// --- Probe daemon health so we can tell the operator if it's missing. ---
+async function probeDaemonOnce() {
+  return new Promise((resolve) => {
+    const req = http.get(`${DAEMON_URL}/health`, { timeout: 1500 }, (res) => {
+      res.resume()
+      resolve(res.statusCode === 200)
+    })
+    req.on('error', () => resolve(false))
+    req.on('timeout', () => { req.destroy(); resolve(false) })
+  })
+}
+const daemonReachable = await probeDaemonOnce()
+if (!daemonReachable) {
+  log('daemon at 127.0.0.1:8910 is unreachable — run /session-bridge:setup to install it')
+}
+
 // --- MCP Server with channel capability ---
 const serverName = 'session-bridge'
 
+const setupHint = daemonReachable
+  ? null
+  : (
+    'IMPORTANT: the session-bridge daemon at 127.0.0.1:8910 is NOT running on this machine. ' +
+    'The session mesh is offline until it is installed. Tell the user to run `/session-bridge:setup` ' +
+    '(or invoke the setup skill yourself if you have permission). Until then, the message, reply, ' +
+    'sessions, label, and broadcast tools below will not work.'
+  )
+
 const mcp = new Server(
-  { name: serverName, version: '0.1.0' },
+  { name: serverName, version: '0.2.0' },
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
@@ -197,6 +222,7 @@ const mcp = new Server(
       'Use the sessions tool to see who is in the mesh — supports namespace and label-selector filters.',
       'Use the label tool to tag this session (or another) with key:value labels.',
       'Use the broadcast tool to message every session matching a selector (e.g. "kind:service").',
+      ...(setupHint ? ['', setupHint] : []),
     ].join('\n'),
   },
 )
