@@ -1,6 +1,7 @@
 """FastAPI application with background session polling."""
 
 import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,18 @@ from app import routes
 from app.discovery import discover_sessions
 from app.monitor import SessionMonitor
 from app.telemetry import send_event
+
+
+def _configure_logging() -> None:
+    """Make our log records visible under systemd / launchd. See dispatcher's
+    main.py for the rationale — uvicorn doesn't touch the root logger, so
+    our `log.info(...)` calls silently drop unless we install a handler.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
+
 
 monitor = SessionMonitor()
 
@@ -28,6 +41,7 @@ async def poll_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_logging()
     routes.monitor = monitor
     task = asyncio.create_task(poll_loop())
     send_event("daemon_started")
