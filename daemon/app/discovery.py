@@ -20,19 +20,32 @@ class DiscoveredSession:
 
 
 def _is_pid_alive(pid: int) -> bool:
+    # Signal 0 probes existence without delivering a signal — portable across
+    # Linux and macOS, unlike reading /proc (which doesn't exist on macOS).
     try:
-        with open(f"/proc/{pid}/stat"):
-            return True
-    except FileNotFoundError:
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    return True
 
 
-def _get_ppid(pid: int) -> int | None:
+def _ppid_map() -> dict[int, int]:
+    """Map every pid -> ppid via a single `ps` call (portable: Linux + macOS)."""
     try:
-        with open(f"/proc/{pid}/stat") as f:
-            return int(f.read().split()[3])
-    except (FileNotFoundError, PermissionError, ValueError, IndexError):
-        return None
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return {}
+    parents: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            parents[int(parts[0])] = int(parts[1])
+    return parents
 
 
 def _name_from_path(path: str) -> str:
@@ -121,7 +134,7 @@ def _build_shell_to_tab_title() -> dict[int, str]:
     return shell_to_title
 
 
-def _find_tab_title(pid: int, shell_to_title: dict[int, str]) -> str:
+def _find_tab_title(pid: int, shell_to_title: dict[int, str], ppid_map: dict[int, int]) -> str:
     """Walk up the process tree to find a shell PID with a known tab title."""
     visited = set()
     current = pid
@@ -129,7 +142,7 @@ def _find_tab_title(pid: int, shell_to_title: dict[int, str]) -> str:
         visited.add(current)
         if current in shell_to_title:
             return shell_to_title[current]
-        current = _get_ppid(current)
+        current = ppid_map.get(current)
     return ""
 
 
@@ -138,6 +151,9 @@ def discover_sessions() -> list[DiscoveredSession]:
         return []
 
     shell_to_title = _build_shell_to_tab_title()
+    # Tab titles only exist on KDE/Yakuake; skip the process-table snapshot
+    # entirely when there's nothing to match (e.g. macOS).
+    ppid_map = _ppid_map() if shell_to_title else {}
     sessions = []
 
     for path in SESSIONS_DIR.glob("*.json"):
@@ -154,7 +170,7 @@ def discover_sessions() -> list[DiscoveredSession]:
         if not _is_pid_alive(pid):
             continue
 
-        tab_title = _find_tab_title(pid, shell_to_title)
+        tab_title = _find_tab_title(pid, shell_to_title, ppid_map)
 
         sessions.append(DiscoveredSession(
             session_id=session_id,

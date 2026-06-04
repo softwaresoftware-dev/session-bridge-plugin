@@ -35,11 +35,15 @@ class TrackedSession:
 
 
 def _is_pid_alive(pid: int) -> bool:
+    # Signal 0 probes existence without delivering a signal — portable across
+    # Linux and macOS, unlike reading /proc (which doesn't exist on macOS).
     try:
-        with open(f"/proc/{pid}/stat"):
-            return True
-    except FileNotFoundError:
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    return True
 
 
 @dataclass

@@ -26,6 +26,7 @@ import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 
 const DAEMON_URL = 'http://127.0.0.1:8910'
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions')
@@ -42,17 +43,18 @@ process.stdout.on('error', (err) => log(`stdout error: ${err}`))
 
 // --- Find our session ID by walking up the process tree ---
 
-function readPpid(pid) {
+// Parent pid + command line for a process, via a single `ps` call.
+// Portable across Linux and macOS, unlike reading /proc (absent on macOS).
+function readProc(pid) {
   try {
-    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8')
-    return parseInt(stat.split(' ')[3], 10)
-  } catch { return null }
-}
-
-function readCmdline(pid) {
-  try {
-    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim()
-  } catch { return '' }
+    const out = execFileSync('ps', ['-o', 'ppid=,command=', '-p', String(pid)], {
+      encoding: 'utf-8', timeout: 5000,
+    }).trim()
+    if (!out) return { ppid: null, cmd: '' }
+    const sep = out.indexOf(' ')
+    const ppid = parseInt(out.slice(0, sep), 10)
+    return { ppid: Number.isNaN(ppid) ? null : ppid, cmd: out.slice(sep + 1).trim() }
+  } catch { return { ppid: null, cmd: '' } }
 }
 
 function findClaudePid() {
@@ -60,11 +62,11 @@ function findClaudePid() {
   const visited = new Set()
   while (pid && pid > 1 && !visited.has(pid)) {
     visited.add(pid)
-    const cmd = readCmdline(pid)
+    const { ppid, cmd } = readProc(pid)
     if (cmd.includes('claude') && !cmd.includes('channel.mjs')) {
       return pid
     }
-    pid = readPpid(pid)
+    pid = ppid
   }
   return null
 }
@@ -200,7 +202,7 @@ const setupHint = daemonReachable
   )
 
 const mcp = new Server(
-  { name: serverName, version: '0.2.0' },
+  { name: serverName, version: '0.2.1' },
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
