@@ -136,31 +136,17 @@ const claudePid = findClaudePid()
 const sessionInfo = claudePid ? readSessionInfo(claudePid) : null
 const sessionId = sessionInfo?.sessionId
 
-// SESSION_NAME / SESSION_NAMESPACE / SESSION_LABELS come from the parent
-// process env (e.g. taskpilot exports them when spawning a managed agent,
-// or the user sets SESSION_NAME=foo before `claude`). They are read here
-// so the daemon can register a human-friendly name, scope lookups by
-// namespace, and run label-based selectors. All are optional. Without a
-// SESSION_NAME, the daemon's discovery will derive a name from the cwd
-// basename, and the user can rename later via the label tool.
+// SESSION_NAME comes from the parent process env (e.g. taskpilot exports it
+// when spawning a managed agent, or the user sets SESSION_NAME=foo before
+// `claude`). It lets the daemon register a human-friendly name. Optional —
+// without it, the daemon derives a name from the cwd basename.
 const initialName = (process.env.SESSION_NAME || '').trim() || null
-const initialNamespace = (process.env.SESSION_NAMESPACE || '').trim() || null
-const initialLabels = (process.env.SESSION_LABELS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
 
 if (!sessionId) {
   log(`could not find session ID (claude pid: ${claudePid})`)
 }
 if (initialName) {
   log(`initial name from SESSION_NAME: ${initialName}`)
-}
-if (initialNamespace) {
-  log(`initial namespace from SESSION_NAMESPACE: ${initialNamespace}`)
-}
-if (initialLabels.length) {
-  log(`initial labels from SESSION_LABELS: ${initialLabels.join(',')}`)
 }
 
 // --- Outbound: SSE listeners ---
@@ -198,11 +184,11 @@ const setupHint = daemonReachable
     'IMPORTANT: the session-bridge daemon at 127.0.0.1:8910 is NOT running on this machine. ' +
     'The session mesh is offline until it is installed. Tell the user to run `/session-bridge:setup` ' +
     '(or invoke the setup skill yourself if you have permission). Until then, the message, reply, ' +
-    'sessions, label, and broadcast tools below will not work.'
+    'and sessions tools below will not work.'
   )
 
 const mcp = new Server(
-  { name: serverName, version: '0.2.1' },
+  { name: serverName, version: '0.3.0' },
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
@@ -212,8 +198,7 @@ const mcp = new Server(
       `You are part of a session mesh. Your session ID is ${sessionId || 'unknown'}.`,
       initialName
         ? `Your session name is "${initialName}" (from the SESSION_NAME env var at launch).`
-        : 'Your session name is unset. The daemon will derive one from your cwd basename; rename anytime via the label tool.',
-      initialNamespace ? `Your namespace is "${initialNamespace}". Address sessions in your namespace as "name.${initialNamespace}".` : 'You have no namespace assigned.',
+        : 'Your session name is unset. The daemon derives one from your cwd basename.',
       'Messages from other sessions arrive as <channel> notifications.',
       'The notification content includes who sent it (from_name, from_id).',
       '',
@@ -221,9 +206,7 @@ const mcp = new Server(
       'The reply is automatically routed back to the sender session.',
       '',
       'To initiate a conversation with another session, use the message tool.',
-      'Use the sessions tool to see who is in the mesh — supports namespace and label-selector filters.',
-      'Use the label tool to tag this session (or another) with key:value labels.',
-      'Use the broadcast tool to message every session matching a selector (e.g. "kind:service").',
+      'Use the sessions tool to see who is in the mesh.',
       ...(setupHint ? ['', setupHint] : []),
     ].join('\n'),
   },
@@ -258,38 +241,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sessions',
-      description: 'List Claude sessions in the mesh. Optionally filter by namespace and/or label selector.',
+      description: 'List Claude sessions in the mesh.',
       inputSchema: {
         type: 'object',
-        properties: {
-          namespace: { type: 'string', description: 'Restrict to a specific namespace (e.g. "taskpilot")' },
-          selector: { type: 'string', description: 'Comma-separated key:value label selector (AND), e.g. "kind:service,tier:critical"' },
-        },
-      },
-    },
-    {
-      name: 'label',
-      description: 'Replace the labels on a session. Each label is a "key:value" string.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          session_id: { type: 'string', description: 'Target session UUID; defaults to this session' },
-          labels: { type: 'array', items: { type: 'string' }, description: 'Full label set to apply (replaces existing)' },
-        },
-        required: ['labels'],
-      },
-    },
-    {
-      name: 'broadcast',
-      description: 'Send a message to every session matching a label selector and/or namespace.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'The message to send' },
-          selector: { type: 'string', description: 'Comma-separated key:value label selector (AND)' },
-          namespace: { type: 'string', description: 'Restrict to a namespace' },
-        },
-        required: ['text'],
+        properties: {},
       },
     },
   ],
@@ -339,12 +294,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (name === 'sessions') {
-    const params = new URLSearchParams()
-    if (args?.namespace) params.set('namespace', args.namespace)
-    if (args?.selector) params.set('selector', args.selector)
-    const qs = params.toString()
-    const url = qs ? `${DAEMON_URL}/sessions?${qs}` : `${DAEMON_URL}/sessions`
-    const result = await httpGet(url)
+    const result = await httpGet(`${DAEMON_URL}/sessions`)
     if (!result.ok) {
       return { content: [{ type: 'text', text: formatDaemonError('could not list', result) }] }
     }
@@ -352,45 +302,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const sessions = JSON.parse(result.body)
       const lines = sessions.map(s => {
         const ch = s.channel_port ? `ch:${s.channel_port}` : 'no-channel'
-        const ns = s.namespace ? `${s.name}.${s.namespace}` : s.name
-        const labels = (s.labels && s.labels.length) ? ` [${s.labels.join(',')}]` : ''
         const me = s.session_id === sessionId ? ' (you)' : ''
-        return `${ns} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${labels}${me}`
+        return `${s.name} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${me}`
       })
       return { content: [{ type: 'text', text: lines.join('\n') || 'no sessions found' }] }
-    } catch {
-      return { content: [{ type: 'text', text: result.body }] }
-    }
-  }
-
-  if (name === 'label') {
-    const target = args.session_id || sessionId
-    if (!target) {
-      return { content: [{ type: 'text', text: 'no session_id available — pass one explicitly' }] }
-    }
-    const result = await httpPost(`${DAEMON_URL}/label`, { session_id: target, labels: args.labels })
-    if (result.ok) {
-      return { content: [{ type: 'text', text: `labels set on ${target.slice(0, 8)}: ${args.labels.join(', ') || '(empty)'}` }] }
-    }
-    return { content: [{ type: 'text', text: formatDaemonError('could not set labels', result) }] }
-  }
-
-  if (name === 'broadcast') {
-    const payload = { text: args.text, from_session: sessionId }
-    if (args.selector) payload.selector = args.selector
-    if (args.namespace) payload.namespace = args.namespace
-    const result = await httpPost(`${DAEMON_URL}/broadcast`, payload)
-    if (!result.ok) {
-      return { content: [{ type: 'text', text: formatDaemonError('broadcast failed', result) }] }
-    }
-    try {
-      const body = JSON.parse(result.body)
-      const summary = `broadcast: ${body.sent}/${body.matched} delivered`
-      const skipped = body.deliveries.filter(d => d.status !== 'sent')
-      const detail = skipped.length
-        ? '\n' + skipped.map(d => `  ${d.name} — ${d.status}${d.reason ? ' (' + d.reason + ')' : ''}`).join('\n')
-        : ''
-      return { content: [{ type: 'text', text: summary + detail }] }
     } catch {
       return { content: [{ type: 'text', text: result.body }] }
     }
@@ -513,8 +428,6 @@ const httpServer = http.createServer(async (req, res) => {
 function buildRegisterPayload() {
   const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
   if (initialName) payload.name = initialName
-  if (initialNamespace) payload.namespace = initialNamespace
-  if (initialLabels.length) payload.labels = initialLabels
   return payload
 }
 
@@ -525,8 +438,6 @@ async function registerWithDaemon(reason) {
       `session: ${sessionId.slice(0, 8)}`,
       `port: ${port}`,
       initialName && `name: ${initialName}`,
-      initialNamespace && `namespace: ${initialNamespace}`,
-      initialLabels.length && `labels: ${initialLabels.join(',')}`,
     ].filter(Boolean)
     log(`${reason} (${parts.join(', ')})`)
     return true
