@@ -5,7 +5,7 @@ Channel MCP that lets Claude Code sessions message each other, plus the bundled 
 ## Shape
 
 - `channel.mjs` — per-session MCP server. Picks a port, registers with the local bridge daemon at `127.0.0.1:8910`, surfaces `sessions`/`message`/`reply` tools.
-- `daemon/` — the FastAPI bridge daemon. `daemon/app/` is the application package; `daemon/run.py` is the cross-platform entry point. `peers.py` provides Tailscale-aware host discovery for `/hosts` (the softwaresoftware resolver uses it to route capability requests across hosts).
+- `daemon/` — the FastAPI bridge daemon. `daemon/app/` is the application package; `daemon/run.py` is the cross-platform entry point. Loopback-only (`127.0.0.1:8910`) — a single-host registry, no cross-host routing.
 - `skills/setup/SKILL.md` — `/session-bridge:setup`. Creates the venv, registers the daemon with `daemon-manager`, installs launchd/systemd/Task Scheduler autostart.
 - `tests/` — manifest tests.
 
@@ -35,10 +35,9 @@ After setup:
 
 ## HTTP API
 
-The daemon is a name+id session registry. Endpoints:
+The daemon is a name+id session registry, loopback-only. Endpoints:
 
 - `GET /health` — `{ok, sessions}`.
-- `GET /hosts` — every host in the mesh with the capabilities it advertises (self via tailscale/`SESSION_BRIDGE_HOST_NAME`, peers from `peers.json`). Consumed by the softwaresoftware resolver for cross-host capability routing.
 - `GET /sessions` — all tracked sessions.
 - `GET /sessions/{name_or_id}` — resolve one by UUID, UUID prefix, or name. Used by channel's 30s heartbeat to detect daemon restarts / port mismatch / forget; re-registers on any of those.
 - `POST /register` — channel calls this on boot with `{session_id, pid, channel_port, name?}`.
@@ -50,4 +49,4 @@ If channel.mjs probes `:8910/health` on boot and gets nothing, the MCP `instruct
 
 ## History
 
-v0.2.0 bundled the daemon + setup skill (previously the plugin shipped only `channel.mjs`). v0.3.0 cut the mesh down to the surface its consumers actually use: removed the unused `/spawn`, `/service`, `/name`, `/label`, `/broadcast` endpoints, dropped namespaces / labels / selectors, dropped cross-host message *forwarding* (kept `/hosts` capability discovery), and replaced KDE/Yakuake tab-title naming with cwd-basename naming.
+v0.2.0 bundled the daemon + setup skill (previously the plugin shipped only `channel.mjs`). v0.3.0 cut the mesh down to a single-host name+id messaging registry: removed the unused `/spawn`, `/service`, `/name`, `/label`, `/broadcast` endpoints; dropped namespaces / labels / selectors; removed all cross-host functionality (`/hosts`, `peers.py`, Tailscale peer discovery) and bound the daemon to loopback; dropped the unused channel SSE `/events` stream; and replaced KDE/Yakuake tab-title naming with cwd-basename naming.

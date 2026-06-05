@@ -28,11 +28,3 @@ class RegisterRequest(BaseModel):
 class HealthResponse(BaseModel):
     ok: bool = True
     sessions: int = 0
-
-
-class HostResponse(BaseModel):
-    host: str
-    self: bool
-    capabilities: list[str] = []
-    ip: str | None = None
-    port: int | None = None

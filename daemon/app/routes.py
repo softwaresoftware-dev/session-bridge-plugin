@@ -5,10 +5,8 @@ import urllib.request
 
 from fastapi import APIRouter, HTTPException
 
-from app import peers
 from app.models import (
     HealthResponse,
-    HostResponse,
     MessageRequest,
     RegisterRequest,
     SessionResponse,
@@ -97,36 +95,6 @@ def _check_name_collision(name: str | None, owner_session_id: str) -> None:
 @router.get("/health")
 def health() -> HealthResponse:
     return HealthResponse(sessions=len(_get_monitor().list_sessions()))
-
-
-@router.get("/hosts")
-def list_hosts() -> list[HostResponse]:
-    """List every host in the mesh with the capabilities it advertises.
-
-    Self appears first when the daemon can identify itself (via tailscale or
-    SESSION_BRIDGE_HOST_NAME). Peers come from peers.json. Unreachable peers
-    (declared but not currently in the tailnet) are omitted. Used by the
-    softwaresoftware resolver to route capability requests across hosts.
-    """
-    out: list[HostResponse] = []
-    self_host = peers.get_self_host()
-    if self_host:
-        out.append(HostResponse(
-            host=self_host,
-            self=True,
-            capabilities=peers.get_self_capabilities(),
-            ip=peers.get_self_ip(),
-            port=peers.DEFAULT_PEER_PORT,
-        ))
-    for p in peers.load_peers():
-        out.append(HostResponse(
-            host=p.host,
-            self=False,
-            capabilities=list(p.capabilities),
-            ip=p.ip,
-            port=p.port,
-        ))
-    return out
 
 
 @router.get("/sessions")

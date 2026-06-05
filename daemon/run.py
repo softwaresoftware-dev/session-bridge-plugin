@@ -1,8 +1,9 @@
 """Entry point for the session-bridge daemon.
 
 Cross-platform launcher invoked by daemon-manager. Reads bind host/port from
-SESSION_BRIDGE_BIND / SESSION_BRIDGE_PORT (defaults: 0.0.0.0:8910) and execs
-uvicorn against app.main:app from this file's directory.
+SESSION_BRIDGE_BIND / SESSION_BRIDGE_PORT (defaults: 127.0.0.1:8910) and execs
+uvicorn against app.main:app from this file's directory. The daemon is a
+loopback-only, single-host session registry — nothing remote connects to it.
 """
 
 import os
@@ -16,7 +17,7 @@ def main() -> None:
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
 
-    host = os.environ.get("SESSION_BRIDGE_BIND", "0.0.0.0")
+    host = os.environ.get("SESSION_BRIDGE_BIND", "127.0.0.1")
     port = int(os.environ.get("SESSION_BRIDGE_PORT", "8910"))
 
     import uvicorn

@@ -11,7 +11,6 @@
  * Provides:
  *   - MCP server with claude/channel capability (stdio transport)
  *   - HTTP POST  /         — push message into this Claude session (JSON: {text, from_name, from_id})
- *   - GET        /events   — SSE stream of outbound messages
  *   - GET        /health   — health check
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -149,13 +148,6 @@ if (initialName) {
   log(`initial name from SESSION_NAME: ${initialName}`)
 }
 
-// --- Outbound: SSE listeners ---
-const listeners = new Set()
-function emitSSE(text) {
-  const chunk = text.split('\n').map(l => `data: ${l}\n`).join('') + '\n'
-  for (const emit of listeners) emit(chunk)
-}
-
 // --- Track inbound message senders for reply routing ---
 const chatSenders = new Map()  // chat_id -> { from_name, from_id }
 
@@ -255,27 +247,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === 'reply') {
     const sender = chatSenders.get(args.chat_id)
-    // Also emit to SSE for external consumers
-    emitSSE(`[${args.chat_id}] ${args.text}`)
-
-    if (sender?.from_id) {
-      // Route reply back through daemon to sender's channel
-      try {
-        const result = await httpPost(
-          `${DAEMON_URL}/sessions/${encodeURIComponent(sender.from_id)}/message`,
-          { text: args.text, from_session: sessionId },
-        )
-        if (result.ok) {
-          return { content: [{ type: 'text', text: `reply sent to ${sender.from_name || sender.from_id}` }] }
-        }
-        return { content: [{ type: 'text', text: `reply could not be delivered to ${sender.from_name || sender.from_id}: ${result.body || result.error}. The sender may not have a channel.` }] }
-      } catch (err) {
-        return { content: [{ type: 'text', text: `reply routing error: ${err.message}. SSE-only reply emitted.` }] }
-      }
+    if (!sender?.from_id) {
+      return { content: [{ type: 'text', text: `unknown chat_id '${args.chat_id}' — no sender to route the reply to` }] }
     }
-
-    // No sender info — SSE-only reply (external consumer)
-    return { content: [{ type: 'text', text: 'reply sent (SSE only — no sender to route back to)' }] }
+    // Route reply back through daemon to sender's channel
+    try {
+      const result = await httpPost(
+        `${DAEMON_URL}/sessions/${encodeURIComponent(sender.from_id)}/message`,
+        { text: args.text, from_session: sessionId },
+      )
+      if (result.ok) {
+        return { content: [{ type: 'text', text: `reply sent to ${sender.from_name || sender.from_id}` }] }
+      }
+      return { content: [{ type: 'text', text: `reply could not be delivered to ${sender.from_name || sender.from_id}: ${result.body || result.error}. The sender may not have a channel.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `reply routing error: ${err.message}` }] }
+    }
   }
 
   if (name === 'message') {
@@ -331,19 +318,6 @@ const port = await findFreePort()
 
 const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
-
-  if (req.method === 'GET' && url.pathname === '/events') {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    })
-    res.write(': connected\n\n')
-    const emit = (chunk) => res.write(chunk)
-    listeners.add(emit)
-    req.on('close', () => listeners.delete(emit))
-    return
-  }
 
   if (req.method === 'GET' && url.pathname === '/health') {
     res.writeHead(200)
