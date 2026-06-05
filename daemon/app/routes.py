@@ -72,7 +72,6 @@ def _to_response(s: TrackedSession) -> SessionResponse:
     return SessionResponse(
         name=s.name,
         session_id=s.session_id,
-        state=s.state.value,
         project_dir=s.project_dir,
         claude_pid=s.pid,
         last_change=s.last_change,
@@ -110,14 +109,20 @@ def get_session(name_or_id: str) -> SessionResponse:
 @router.post("/register")
 def register_channel(body: RegisterRequest) -> dict:
     _check_name_collision(body.name, body.session_id)
-    found = _get_monitor().register_channel(body.session_id, body.channel_port, body.name)
+    existed = _get_monitor().register_channel(
+        body.session_id,
+        body.channel_port,
+        body.pid,
+        name=body.name,
+        cwd=body.cwd or "",
+    )
     send_event("channel_registered", port=body.channel_port, target_session=body.session_id, name=body.name)
     return {
         "registered": True,
         "session_id": body.session_id,
         "channel_port": body.channel_port,
         "name": body.name,
-        "session_found": found,
+        "session_found": existed,
     }
 
 

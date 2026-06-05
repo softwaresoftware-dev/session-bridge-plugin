@@ -40,13 +40,13 @@ The daemon is a name+id session registry, loopback-only. Endpoints:
 - `GET /health` — `{ok, sessions}`.
 - `GET /sessions` — all tracked sessions.
 - `GET /sessions/{name_or_id}` — resolve one by UUID, UUID prefix, or name. Used by channel's 30s heartbeat to detect daemon restarts / port mismatch / forget; re-registers on any of those.
-- `POST /register` — channel calls this on boot with `{session_id, pid, channel_port, name?}`.
+- `POST /register` — channel calls this on boot with `{session_id, pid, channel_port, name?, cwd?}`.
 - `POST /sessions/{name_or_id}/message` — sender → daemon → receiver's channel port.
 
-Sessions are auto-discovered from `~/.claude/sessions/*.json`; a name is derived from the cwd basename unless the session registers a `SESSION_NAME`. Custom names persist across daemon restarts in `$SESSION_BRIDGE_STATE_DIR/names.json`.
+**Registration is authoritative**: a session exists in the registry iff its `channel.mjs` has POSTed `/register` — there is no background discovery. A name is derived from the `cwd` basename (deduped) unless the session registers a `SESSION_NAME`. The registry is in-memory and not persisted: after a daemon restart it's empty until each channel re-registers on its next 30s heartbeat (the heartbeat GETs `/sessions/{id}` and re-registers on a 404 or a port mismatch). Dead sessions (pid gone) are reaped lazily whenever the registry is read.
 
 If channel.mjs probes `:8910/health` on boot and gets nothing, the MCP `instructions` block adds a hint telling Claude to run `/session-bridge:setup` before trying mesh tools.
 
 ## History
 
-v0.2.0 bundled the daemon + setup skill (previously the plugin shipped only `channel.mjs`). v0.3.0 cut the mesh down to a single-host name+id messaging registry: removed the unused `/spawn`, `/service`, `/name`, `/label`, `/broadcast` endpoints; dropped namespaces / labels / selectors; removed all cross-host functionality (`/hosts`, `peers.py`, Tailscale peer discovery) and bound the daemon to loopback; dropped the unused channel SSE `/events` stream; and replaced KDE/Yakuake tab-title naming with cwd-basename naming.
+v0.2.0 bundled the daemon + setup skill (previously the plugin shipped only `channel.mjs`). v0.3.0 cut the mesh down to a single-host name+id messaging registry: removed the unused `/spawn`, `/service`, `/name`, `/label`, `/broadcast` endpoints; dropped namespaces / labels / selectors; removed all cross-host functionality (`/hosts`, `peers.py`, Tailscale peer discovery) and bound the daemon to loopback; dropped the unused channel SSE `/events` stream; and replaced KDE/Yakuake tab-title naming with cwd-basename naming. It also made registration authoritative — deleting `~/.claude/sessions` discovery (`discovery.py`), the background poll loop, and the `names.json` persistence in favor of an in-memory registry driven entirely by `/register` with lazy pid-reaping.

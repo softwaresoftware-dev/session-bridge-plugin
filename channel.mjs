@@ -134,6 +134,10 @@ function formatDaemonError(prefix, result) {
 const claudePid = findClaudePid()
 const sessionInfo = claudePid ? readSessionInfo(claudePid) : null
 const sessionId = sessionInfo?.sessionId
+// The session's working directory, from ~/.claude/sessions/{pid}.json. Sent in
+// the /register payload so the daemon can derive a name (cwd basename) and show
+// project_dir — the daemon no longer reads the sessions dir itself.
+const sessionCwd = sessionInfo?.cwd || ''
 
 // SESSION_NAME comes from the parent process env (e.g. taskpilot exports it
 // when spawning a managed agent, or the user sets SESSION_NAME=foo before
@@ -290,7 +294,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const lines = sessions.map(s => {
         const ch = s.channel_port ? `ch:${s.channel_port}` : 'no-channel'
         const me = s.session_id === sessionId ? ' (you)' : ''
-        return `${s.name} (${s.session_id.slice(0, 8)}) — ${s.state} — ${ch}${me}`
+        return `${s.name} (${s.session_id.slice(0, 8)}) — ${ch}${me}`
       })
       return { content: [{ type: 'text', text: lines.join('\n') || 'no sessions found' }] }
     } catch {
@@ -402,6 +406,7 @@ const httpServer = http.createServer(async (req, res) => {
 function buildRegisterPayload() {
   const payload = { session_id: sessionId, pid: claudePid, channel_port: port }
   if (initialName) payload.name = initialName
+  if (sessionCwd) payload.cwd = sessionCwd
   return payload
 }
 
@@ -420,28 +425,25 @@ async function registerWithDaemon(reason) {
   return false
 }
 
-// Heartbeat: ask the daemon if it still knows us. Re-register when:
-//   - daemon 404s the session (never saw us, or fully forgot)
-//   - daemon 200s but channel_port is null (rediscovered the session from
-//     ~/.claude/sessions/{pid}.json after a bounce, but lost the port —
-//     the registration step is what carries the port, and the daemon does
-//     not persist it)
+// Heartbeat: ask the daemon if it still knows us, and re-register when:
+//   - daemon 404s the session — it forgot us (restart, crash, or never saw
+//     our /register). This is also how we recover after a daemon bounce: the
+//     registry is in-memory, so a restarted daemon has no rows until each
+//     channel re-registers on its next heartbeat.
 //   - daemon 200s with a DIFFERENT channel_port than ours: another process
-//     resolved to the same session_id and overwrote our registration. Last
-//     writer wins at /register today; this heartbeat reclaims the row so
-//     mis-routed traffic stops landing on the squatter. Symptom: senders
-//     POST messages, daemon forwards, the squatter swallows them, sender
-//     gets no reply. Caused by stray `node -e import('./channel.mjs')`
-//     instances or any other channel.mjs that walks back to the same
-//     parent claude when discovering its session.
+//     resolved to the same session_id and overwrote our registration (last
+//     writer wins at /register). Reclaiming the row stops mis-routed traffic
+//     landing on the squatter — senders POST, the daemon forwards, the
+//     squatter swallows it, the sender gets no reply. Caused by stray
+//     `node -e import('./channel.mjs')` instances that walk back to the same
+//     parent claude.
 // Anything else (network blip, 5xx, malformed body) we let the next tick handle.
 const HEARTBEAT_INTERVAL_MS = 30_000
 
 async function heartbeat() {
   if (!sessionId) return
   const result = await httpGet(`${DAEMON_URL}/sessions/${encodeURIComponent(sessionId)}`)
-  if (result.error) return
-  if (!result.body) return
+  if (result.error || !result.body) return
   let parsed
   try {
     parsed = JSON.parse(result.body)
@@ -449,9 +451,7 @@ async function heartbeat() {
     return
   }
   if (result.ok) {
-    if (parsed?.channel_port == null) {
-      await registerWithDaemon('re-registered after daemon rediscovered without channel')
-    } else if (parsed.channel_port !== port) {
+    if (parsed.channel_port !== port) {
       await registerWithDaemon(`re-registered after port mismatch (daemon=${parsed.channel_port}, mine=${port})`)
     }
     return

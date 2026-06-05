@@ -6,7 +6,6 @@ from pydantic import BaseModel
 class SessionResponse(BaseModel):
     name: str
     session_id: str
-    state: str
     project_dir: str
     claude_pid: int
     last_change: float
@@ -23,6 +22,7 @@ class RegisterRequest(BaseModel):
     pid: int
     channel_port: int
     name: str | None = None
+    cwd: str | None = None
 
 
 class HealthResponse(BaseModel):
