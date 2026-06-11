@@ -184,7 +184,7 @@ const setupHint = daemonReachable
   )
 
 const mcp = new Server(
-  { name: serverName, version: '0.3.0' },
+  { name: serverName, version: '0.4.0' },
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
@@ -362,10 +362,9 @@ const httpServer = http.createServer(async (req, res) => {
 
     // Bound the notification wait. Without this, a wedged claude stdio (the
     // pipe backs up when the harness stops draining MCP traffic) hangs this
-    // POST handler indefinitely, which cascades: the daemon's 5s forward
-    // timeout fires, sender sees "channel error", and the failure is silent
-    // from the user's POV. 3s is generous for healthy stdio (sub-ms typical)
-    // and stays under the daemon's 5s ceiling so we still return 200 in time.
+    // POST handler indefinitely and the daemon's 5s forward timeout fires.
+    // 3s is generous for healthy stdio (sub-ms typical) and stays under the
+    // daemon's 5s ceiling so our status still reaches the sender in time.
     let notifyTimer
     const notificationPromise = mcp.notification({
       method: 'notifications/claude/channel',
@@ -385,10 +384,18 @@ const httpServer = http.createServer(async (req, res) => {
         3000,
       )
     })
+    // Delivery is verified end-to-end: a failed/timed-out notification is a
+    // 503, NOT a 200. Senders (the bridge daemon → taskpilot → the mindframe
+    // surface) rely on this status to know the agent actually received the
+    // message — a silent drop here used to read as "delivered" all the way up
+    // the chain.
     try {
       await Promise.race([notificationPromise, timeoutPromise])
     } catch (err) {
       log(`notification error: ${err.message || err}`)
+      res.writeHead(503)
+      res.end(`notification not delivered (chat_id: ${chat_id}): ${err.message || err}`)
+      return
     } finally {
       clearTimeout(notifyTimer)
     }
