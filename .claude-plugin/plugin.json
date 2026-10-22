@@ -3,7 +3,7 @@
   "description": "Channel MCP for session-bridge mesh \u2014 enables bidirectional communication between Claude sessions. Bundles the FastAPI bridge daemon; installs it via daemon-manager on first setup.",
   "version": "0.4.0",
   "author": {
-    "name": "NOV LLC",
+    "name": "GRAV LLC",
     "url": "https://github.com/softwaresoftware-dev"
   },
   "repository": "https://github.com/softwaresoftware-dev/session-bridge-plugin",
